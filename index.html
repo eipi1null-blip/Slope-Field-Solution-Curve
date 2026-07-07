@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Slope Field Leaf Solution Curves</title>
+  <style>
+    :root {
+      --ink: #33343a;
+      --axis: #3f4044;
+      --grid: #cfcfcf;
+      --field: #c53568;
+      --curve: #256f93;
+      --leaf: #4f8d3f;
+      --leaf-edge: #205b28;
+      --button: #27468f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #f7f8fb;
+      color: var(--ink);
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    main {
+      width: min(1220px, calc(100vw - 16px));
+      margin: 0 auto;
+      padding: 8px 0 20px;
+    }
+    .applet {
+      position: relative;
+      border: 2px solid #8b8b8b;
+      background: linear-gradient(180deg, #fbfdff 0%, #f3f9fb 100%);
+      aspect-ratio: 1.56 / 1;
+      min-height: 560px;
+      overflow: hidden;
+      touch-action: none;
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: crosshair;
+      touch-action: none;
+    }
+    .toolbar {
+      position: absolute;
+      inset: 18px 24px auto 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 14px;
+      pointer-events: none;
+    }
+    .formula,
+    button {
+      border-radius: 5px;
+      box-shadow: 0 2px 5px rgba(0,0,0,.16);
+    }
+    .formula {
+      pointer-events: none;
+      padding: 9px 12px;
+      background: rgba(255,255,255,.9);
+      color: #44464c;
+      font: 700 clamp(.95rem, 1.6vw, 1.25rem) Georgia, serif;
+    }
+    button {
+      pointer-events: auto;
+      border: 0;
+      background: var(--button);
+      color: #fff;
+      padding: 11px 18px;
+      font-size: clamp(1rem, 2.1vw, 1.45rem);
+      font-weight: 800;
+      line-height: 1;
+      cursor: pointer;
+    }
+    button:active { transform: translateY(1px); }
+    @media (max-width: 760px) {
+      .applet { aspect-ratio: .9 / 1; min-height: 610px; }
+      .toolbar {
+        inset: 12px 12px auto 12px;
+        align-items: stretch;
+      }
+      .formula { font-size: .9rem; max-width: 62%; }
+      button { padding: 10px 12px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="applet" aria-label="Slope field with leaf solution curves">
+    <canvas id="graph"></canvas>
+    <div class="toolbar">
+      <div class="formula">dy/dx = -y(1 + xy)/(1 - xy)</div>
+      <button id="clearAll" type="button">Clear all</button>
+    </div>
+  </section>
+</main>
+
+<script>
+  const canvas = document.getElementById("graph");
+  const ctx = canvas.getContext("2d");
+  const clearButton = document.getElementById("clearAll");
+
+  const xMin = -4.5, xMax = 4.5;
+  const yMin = -2.45, yMax = 3.05;
+  const singularMargin = 0.045;
+  const leaves = [];
+  let activeLeaf = null;
+  let dragging = false;
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function slopeAt(x, y) {
+    const denominator = 1 - x * y;
+    const numerator = -y * (1 + x * y);
+    if (Math.abs(denominator) < singularMargin) return null;
+    return clamp(numerator / denominator, -30, 30);
+  }
+
+  function finiteSlope(x, y) {
+    const s = slopeAt(x, y);
+    return s !== null && Number.isFinite(s);
+  }
+
+  function plotRect() {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    return { left: 10, right: w - 10, top: 8, bottom: h - 8 };
+  }
+
+  function sx(x) {
+    const r = plotRect();
+    return r.left + (x - xMin) / (xMax - xMin) * (r.right - r.left);
+  }
+
+  function sy(y) {
+    const r = plotRect();
+    return r.bottom - (y - yMin) / (yMax - yMin) * (r.bottom - r.top);
+  }
+
+  function fromScreen(px, py) {
+    const r = plotRect();
+    return {
+      x: xMin + (px - r.left) / (r.right - r.left) * (xMax - xMin),
+      y: yMin + (r.bottom - py) / (r.bottom - r.top) * (yMax - yMin)
+    };
+  }
+
+  function nice(n) {
+    if (Math.abs(n) < 0.005) return "0";
+    return String(Math.round(n * 100) / 100).replace("-", "\u2212");
+  }
+
+  function rk4Step(x, y, h) {
+    const k1 = slopeAt(x, y);
+    if (k1 === null) return null;
+    const k2 = slopeAt(x + h / 2, y + h * k1 / 2);
+    if (k2 === null) return null;
+    const k3 = slopeAt(x + h / 2, y + h * k2 / 2);
+    if (k3 === null) return null;
+    const k4 = slopeAt(x + h, y + h * k3);
+    if (k4 === null) return null;
+    return y + h * (k1 + 2 * k2 + 2 * k3 + k4) / 6;
+  }
+
+  function integrateFrom(seed, direction) {
+    const points = [{ x: seed.x, y: seed.y }];
+    let x = seed.x;
+    let y = seed.y;
+    for (let i = 0; i < 1400; i++) {
+      const currentSlope = slopeAt(x, y);
+      if (currentSlope === null) break;
+      const h = direction * clamp(0.035 / (1 + Math.abs(currentSlope) * 0.38), 0.0035, 0.018);
+      const nextX = x + h;
+      if (nextX < xMin || nextX > xMax) break;
+      const nextY = rk4Step(x, y, h);
+      if (nextY === null) break;
+      if (!Number.isFinite(nextY) || nextY < yMin - 0.25 || nextY > yMax + 0.25) break;
+      if (!finiteSlope(nextX, nextY)) break;
+      x = nextX;
+      y = nextY;
+      points.push({ x, y });
+    }
+    return points;
+  }
+
+  function solutionCurve(seed) {
+    const back = integrateFrom(seed, -1).reverse();
+    const forward = integrateFrom(seed, 1);
+    return back.concat(forward.slice(1));
+  }
+
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.floor(rect.width * dpr);
+    canvas.height = Math.floor(rect.height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+  }
+
+  function drawGrid() {
+    const r = plotRect();
+    ctx.save();
+    ctx.strokeStyle = "rgba(196,196,196,.82)";
+    ctx.lineWidth = 1.2;
+    for (let x = Math.ceil(xMin * 2) / 2; x <= xMax; x += 0.5) {
+      ctx.beginPath();
+      ctx.moveTo(sx(x), r.top);
+      ctx.lineTo(sx(x), r.bottom);
+      ctx.stroke();
+    }
+    for (let y = Math.ceil(yMin * 2) / 2; y <= yMax; y += 0.5) {
+      ctx.beginPath();
+      ctx.moveTo(r.left, sy(y));
+      ctx.lineTo(r.right, sy(y));
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawArrow(fromX, fromY, toX, toY) {
+    const angle = Math.atan2(toY - fromY, toX - fromX);
+    ctx.beginPath();
+    ctx.moveTo(fromX, fromY);
+    ctx.lineTo(toX, toY);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(toX, toY);
+    ctx.lineTo(toX - 27 * Math.cos(angle - 0.32), toY - 27 * Math.sin(angle - 0.32));
+    ctx.lineTo(toX - 27 * Math.cos(angle + 0.32), toY - 27 * Math.sin(angle + 0.32));
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawAxes() {
+    const r = plotRect();
+    ctx.save();
+    ctx.strokeStyle = "#3f4044";
+    ctx.fillStyle = "#3f4044";
+    ctx.lineWidth = 3;
+    drawArrow(r.left, sy(0), r.right - 5, sy(0));
+    drawArrow(sx(0), r.bottom, sx(0), r.top + 5);
+
+    ctx.font = "700 32px Georgia, serif";
+    ctx.fillText("x", r.right - 58, sy(0) - 21);
+    ctx.fillText("y", sx(0) + 24, r.top + 44);
+
+    ctx.font = "700 28px Georgia, serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    for (let x = -4; x <= 4; x++) {
+      if (x === 0) continue;
+      ctx.fillText(nice(x), sx(x), sy(0) + 14);
+    }
+    ctx.fillText("0", sx(0) - 26, sy(0) + 14);
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for (let y = -2; y <= 2; y++) {
+      if (y === 0) continue;
+      ctx.fillText(nice(y), sx(0) - 15, sy(y));
+    }
+    ctx.restore();
+  }
+
+  function drawSingularCurve() {
+    ctx.save();
+    ctx.strokeStyle = "rgba(86,55,82,.78)";
+    ctx.lineWidth = 2.2;
+    ctx.setLineDash([8, 7]);
+    ctx.lineCap = "round";
+    const branches = [
+      { start: xMin, end: -0.34 },
+      { start: 0.34, end: xMax }
+    ];
+    for (const branch of branches) {
+      let drawing = false;
+      ctx.beginPath();
+      for (let i = 0; i <= 260; i++) {
+        const x = branch.start + (branch.end - branch.start) * i / 260;
+        const y = 1 / x;
+        if (y < yMin || y > yMax) {
+          drawing = false;
+          continue;
+        }
+        if (!drawing) {
+          ctx.moveTo(sx(x), sy(y));
+          drawing = true;
+        } else {
+          ctx.lineTo(sx(x), sy(y));
+        }
+      }
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.font = "700 16px Georgia, serif";
+    ctx.fillStyle = "rgba(86,55,82,.86)";
+    ctx.fillText("xy = 1", sx(0.52) + 10, sy(1.92) - 8);
+    ctx.restore();
+  }
+
+  function drawSlopeField() {
+    ctx.save();
+    ctx.strokeStyle = "rgba(197,53,104,.92)";
+    ctx.lineWidth = 2.2;
+    ctx.lineCap = "round";
+    const stepX = 0.25;
+    const stepY = 0.20;
+    for (let x = xMin; x <= xMax + 0.001; x += stepX) {
+      for (let y = yMin; y <= yMax + 0.001; y += stepY) {
+        if (!finiteSlope(x, y)) continue;
+        const m = slopeAt(x, y);
+        const len = 0.095;
+        const norm = Math.hypot(1, m);
+        const dx = len / norm;
+        const dy = m * dx;
+        ctx.beginPath();
+        ctx.moveTo(sx(x - dx), sy(y - dy));
+        ctx.lineTo(sx(x + dx), sy(y + dy));
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawCurve(leaf) {
+    const pts = leaf.curve;
+    if (!pts || pts.length < 2) return;
+    ctx.save();
+    ctx.lineWidth = 4;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "rgba(37,111,147,.92)";
+    ctx.beginPath();
+    ctx.moveTo(sx(pts[0].x), sy(pts[0].y));
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(sx(pts[i].x), sy(pts[i].y));
+    ctx.stroke();
+    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = "rgba(255,255,255,.8)";
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawLeaf(leaf) {
+    const px = sx(leaf.x), py = sy(leaf.y);
+    const m = slopeAt(leaf.x, leaf.y);
+    const angle = m === null ? Math.PI / 2 : Math.atan2(m, 1);
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(-angle + 0.28);
+    ctx.shadowColor = "rgba(20,50,28,.25)";
+    ctx.shadowBlur = 4;
+    ctx.shadowOffsetY = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, -15);
+    ctx.bezierCurveTo(11, -10, 15, 3, 4, 15);
+    ctx.bezierCurveTo(-4, 18, -15, 5, -10, -7);
+    ctx.bezierCurveTo(-7, -12, -2, -14, 0, -15);
+    ctx.closePath();
+    const gradient = ctx.createLinearGradient(-10, -12, 12, 14);
+    gradient.addColorStop(0, "#8fcf55");
+    gradient.addColorStop(0.52, "#4f963f");
+    gradient.addColorStop(1, "#2f6f33");
+    ctx.fillStyle = gradient;
+    ctx.strokeStyle = "#1f5b2c";
+    ctx.lineWidth = 2;
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowColor = "transparent";
+
+    ctx.beginPath();
+    ctx.moveTo(0, -12);
+    ctx.bezierCurveTo(1, -4, 0, 6, 4, 14);
+    ctx.strokeStyle = "rgba(235,250,205,.9)";
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(223,245,184,.62)";
+    ctx.lineWidth = 1;
+    for (const rib of [-7, -3, 2, 6]) {
+      ctx.beginPath();
+      const y = rib;
+      ctx.moveTo(0.5, y);
+      ctx.quadraticCurveTo(rib < 0 ? 5 : 7, y + 2, rib < 0 ? 8 : 6, y + 5);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(-0.5, y);
+      ctx.quadraticCurveTo(rib < 0 ? -5 : -7, y + 2, rib < 0 ? -7 : -5, y + 4);
+      ctx.stroke();
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(3.5, 14);
+    ctx.lineTo(7, 20);
+    ctx.strokeStyle = "#6b4a25";
+    ctx.lineWidth = 2.2;
+    ctx.lineCap = "round";
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function recomputeLeaf(leaf) {
+    leaf.curve = solutionCurve(leaf);
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+    drawGrid();
+    drawSingularCurve();
+    drawSlopeField();
+    drawAxes();
+    leaves.forEach(drawCurve);
+    leaves.forEach(drawLeaf);
+  }
+
+  function pointerPosition(event) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  }
+
+  function leafAt(px, py) {
+    for (let i = leaves.length - 1; i >= 0; i--) {
+      if (Math.hypot(px - sx(leaves[i].x), py - sy(leaves[i].y)) <= 28) return leaves[i];
+    }
+    return null;
+  }
+
+  canvas.addEventListener("pointerdown", (event) => {
+    const p = pointerPosition(event);
+    activeLeaf = leafAt(p.x, p.y);
+    if (!activeLeaf) {
+      const g = fromScreen(p.x, p.y);
+      activeLeaf = { x: clamp(g.x, xMin, xMax), y: clamp(g.y, yMin, yMax), curve: [] };
+      recomputeLeaf(activeLeaf);
+      leaves.push(activeLeaf);
+    }
+    dragging = true;
+    canvas.setPointerCapture(event.pointerId);
+    draw();
+  });
+
+  canvas.addEventListener("pointermove", (event) => {
+    if (!dragging || !activeLeaf) return;
+    const p = pointerPosition(event);
+    const g = fromScreen(p.x, p.y);
+    activeLeaf.x = clamp(Math.round(g.x * 100) / 100, xMin, xMax);
+    activeLeaf.y = clamp(Math.round(g.y * 100) / 100, yMin, yMax);
+    recomputeLeaf(activeLeaf);
+    draw();
+  });
+
+  function endDrag(event) {
+    if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    dragging = false;
+    activeLeaf = null;
+  }
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+
+  clearButton.addEventListener("click", () => {
+    leaves.length = 0;
+    draw();
+  });
+
+  window.addEventListener("resize", resize);
+  resize();
+</script>
+</body>
+</html>
